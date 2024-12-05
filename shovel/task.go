@@ -17,6 +17,7 @@ import (
 	"github.com/indexsupply/shovel/dig"
 	"github.com/indexsupply/shovel/eth"
 	"github.com/indexsupply/shovel/jrpc2"
+	"github.com/indexsupply/shovel/queue"
 	"github.com/indexsupply/shovel/shovel/config"
 	"github.com/indexsupply/shovel/shovel/glf"
 	"github.com/indexsupply/shovel/wctx"
@@ -39,7 +40,7 @@ type Source interface {
 }
 
 type Destination interface {
-	Insert(context.Context, *sync.Mutex, wpg.Conn, []eth.Block) (int64, error)
+	Insert(context.Context, *sync.Mutex, wpg.Conn, queue.Producer, []eth.Block) (int64, error)
 	Delete(context.Context, wpg.Conn, uint64) error
 	Filter() glf.Filter
 }
@@ -85,6 +86,12 @@ func WithIntegration(ig config.Integration) Option {
 func WithPG(pg *pgxpool.Pool) Option {
 	return func(t *Task) {
 		t.pgp = pg
+	}
+}
+
+func WithQueue(producer queue.Producer) Option {
+	return func(t *Task) {
+		t.qProducer = producer
 	}
 }
 
@@ -187,6 +194,8 @@ type Task struct {
 	dests       []Destination
 	destFactory func(config.Integration) (Destination, error)
 	destConfig  config.Integration
+
+	qProducer queue.Producer
 }
 
 func (t *Task) update(
@@ -534,7 +543,7 @@ func (t *Task) insert(
 		}
 		eg.Go(func() error {
 			ctx = wctx.WithNumLimit(ctx, uint64(i), uint64(n))
-			nr, err := t.dests[i].Insert(ctx, &pgmut, pg, blocks[i:n])
+			nr, err := t.dests[i].Insert(ctx, &pgmut, pg, t.qProducer, blocks[i:n])
 			if err != nil {
 				return fmt.Errorf("inserting blocks: %w", err)
 			}
@@ -682,22 +691,24 @@ func TaskUpdates(ctx context.Context, pg wpg.Conn) ([]TaskUpdate, error) {
 // Loads, Starts, and provides method for Restarting tasks
 // based on config stored in the DB and in the config file.
 type Manager struct {
-	ctx     context.Context
-	running sync.Mutex
-	restart chan struct{}
-	tasks   []*Task
-	updates chan uint64
-	pgp     *pgxpool.Pool
-	conf    config.Root
+	ctx       context.Context
+	running   sync.Mutex
+	restart   chan struct{}
+	tasks     []*Task
+	updates   chan uint64
+	pgp       *pgxpool.Pool
+	conf      config.Root
+	qProducer queue.Producer
 }
 
-func NewManager(ctx context.Context, pgp *pgxpool.Pool, conf config.Root) *Manager {
+func NewManager(ctx context.Context, pgp *pgxpool.Pool, producer queue.Producer, conf config.Root) *Manager {
 	return &Manager{
-		ctx:     ctx,
-		restart: make(chan struct{}),
-		updates: make(chan uint64),
-		pgp:     pgp,
-		conf:    conf,
+		ctx:       ctx,
+		restart:   make(chan struct{}),
+		updates:   make(chan uint64),
+		pgp:       pgp,
+		conf:      conf,
+		qProducer: producer,
 	}
 }
 
@@ -755,7 +766,7 @@ func (tm *Manager) Run(ec chan error) {
 	defer tm.running.Unlock()
 
 	var err error
-	tm.tasks, err = loadTasks(tm.ctx, tm.pgp, tm.conf)
+	tm.tasks, err = loadTasks(tm.ctx, tm.pgp, tm.qProducer, tm.conf)
 	if err != nil {
 		ec <- fmt.Errorf("loading tasks: %w", err)
 		return
@@ -775,7 +786,7 @@ func (tm *Manager) Run(ec chan error) {
 	wg.Wait()
 }
 
-func loadTasks(ctx context.Context, pgp *pgxpool.Pool, c config.Root) ([]*Task, error) {
+func loadTasks(ctx context.Context, pgp *pgxpool.Pool, producer queue.Producer, c config.Root) ([]*Task, error) {
 	allIntegrations, err := c.AllIntegrations(ctx, pgp)
 	if err != nil {
 		return nil, fmt.Errorf("loading integrations: %w", err)
@@ -818,6 +829,7 @@ func loadTasks(ctx context.Context, pgp *pgxpool.Pool, c config.Root) ([]*Task, 
 				WithChainID(sc.ChainID),
 				WithSource(src),
 				WithIntegration(ig),
+				WithQueue(producer),
 			)
 			if err != nil {
 				return nil, fmt.Errorf("setting up main task: %w", err)

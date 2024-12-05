@@ -22,6 +22,7 @@ type Root struct {
 	PGURL        string        `json:"pg_url"`
 	Sources      []Source      `json:"eth_sources"`
 	Integrations []Integration `json:"integrations"`
+	KafkaURL     string        `json:"kafka_url"`
 }
 
 func union(a, b wpg.Table) wpg.Table {

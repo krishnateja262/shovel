@@ -11,6 +11,7 @@ import (
 	"github.com/indexsupply/shovel/dig"
 	"github.com/indexsupply/shovel/eth"
 	"github.com/indexsupply/shovel/jrpc2"
+	"github.com/indexsupply/shovel/queue"
 	"github.com/indexsupply/shovel/shovel/config"
 	"github.com/indexsupply/shovel/shovel/glf"
 	"github.com/indexsupply/shovel/tc"
@@ -60,7 +61,7 @@ func (dest *testDestination) blocks() []eth.Block {
 	return blks
 }
 
-func (dest *testDestination) Insert(_ context.Context, _ *sync.Mutex, _ wpg.Conn, blocks []eth.Block) (int64, error) {
+func (dest *testDestination) Insert(_ context.Context, _ *sync.Mutex, _ wpg.Conn, _ queue.Producer, blocks []eth.Block) (int64, error) {
 	dest.Lock()
 	defer dest.Unlock()
 	for _, b := range blocks {
@@ -70,7 +71,7 @@ func (dest *testDestination) Insert(_ context.Context, _ *sync.Mutex, _ wpg.Conn
 }
 
 func (dest *testDestination) add(n uint64, hash, parent []byte) {
-	dest.Insert(context.Background(), nil, nil, []eth.Block{
+	dest.Insert(context.Background(), nil, nil, nil, []eth.Block{
 		eth.Block{
 			Header: eth.Header{
 				Number: eth.Uint64(n),
@@ -403,7 +404,7 @@ func TestLoadTasks(t *testing.T) {
 			},
 		},
 	}
-	tasks, err := loadTasks(ctx, pg, conf)
+	tasks, err := loadTasks(ctx, pg, nil, conf)
 	diff.Test(t, t.Fatalf, err, nil)
 	diff.Test(t, t.Fatalf, len(tasks), 1)
 	diff.Test(t, t.Fatalf, tasks[0].start, uint64(0))

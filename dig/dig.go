@@ -18,6 +18,7 @@ import (
 
 	"github.com/indexsupply/shovel/bint"
 	"github.com/indexsupply/shovel/eth"
+	"github.com/indexsupply/shovel/queue"
 	"github.com/indexsupply/shovel/shovel/glf"
 	"github.com/indexsupply/shovel/wctx"
 	"github.com/indexsupply/shovel/wpg"
@@ -784,7 +785,7 @@ func (ig Integration) Delete(ctx context.Context, pg wpg.Conn, n uint64) error {
 	return err
 }
 
-func (ig Integration) Insert(ctx context.Context, pgmut *sync.Mutex, pg wpg.Conn, blocks []eth.Block) (int64, error) {
+func (ig Integration) Insert(ctx context.Context, pgmut *sync.Mutex, pg wpg.Conn, producer queue.Producer, blocks []eth.Block) (int64, error) {
 	var (
 		err  error
 		skip bool
@@ -835,6 +836,11 @@ func (ig Integration) Insert(ctx context.Context, pgmut *sync.Mutex, pg wpg.Conn
 	if err != nil {
 		return 0, err
 	}
+
+	if err := ig.pushRowsToQueue(lwc, producer, rows); err != nil {
+		slog.ErrorContext(lwc.ctx, "sending queue notifications", "error", err)
+	}
+
 	if ig.numNotify == 0 {
 		return nr, nil
 	}
@@ -842,6 +848,52 @@ func (ig Integration) Insert(ctx context.Context, pgmut *sync.Mutex, pg wpg.Conn
 		slog.ErrorContext(lwc.ctx, "sending notifications", "error", err)
 	}
 	return nr, nil
+}
+
+func (ig *Integration) pushRowsToQueue(lwc *logWithCtx, producer queue.Producer, rows [][]any) error {
+	if producer == nil {
+		return errors.New("nil producer")
+	}
+
+	topic := fmt.Sprintf("%s-%s", lwc.get("src_name"), lwc.get("ig_name"))
+	requiredColumns := map[string]struct{}{
+		"log_addr": {},
+		"tx_hash":  {},
+		"tx_to":    {},
+		"ig_name":  {},
+		"src_name": {},
+	}
+	for i := range rows {
+		payload := map[string]any{}
+		for k := range ig.coldefs {
+			if _, ok := requiredColumns[ig.coldefs[k].Column.Name]; !ok {
+				continue
+			}
+			var data any
+			switch v := rows[i][k].(type) {
+			case int:
+				data = strconv.Itoa(v)
+			case uint64:
+				data = strconv.FormatUint(v, 10)
+			case eth.Uint64:
+				data = strconv.FormatUint(uint64(v), 10)
+			case string:
+				data = v
+			case []byte:
+				data = eth.EncodeHex(v)
+			case *uint256.Int:
+				data = v.Dec()
+			default:
+				return fmt.Errorf("unknown type for notification: %T", rows[i][k])
+			}
+			payload[ig.coldefs[k].Column.Name] = data
+		}
+		slog.InfoContext(lwc.ctx, "kafka-push", "topic", topic, "payload", payload)
+		if err := producer.SendMessage(lwc.ctx, topic, payload); err != nil {
+			return fmt.Errorf("sending pg queue notification: %w", err)
+		}
+	}
+	return nil
 }
 
 func (ig *Integration) notify(lwc *logWithCtx, pg wpg.Conn, rows [][]any) error {

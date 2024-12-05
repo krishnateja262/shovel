@@ -16,6 +16,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/indexsupply/shovel/queue"
+	"github.com/indexsupply/shovel/queue/kafkaesqe"
 	"github.com/indexsupply/shovel/shovel"
 	"github.com/indexsupply/shovel/shovel/config"
 	"github.com/indexsupply/shovel/shovel/web"
@@ -23,6 +25,7 @@ import (
 	"github.com/indexsupply/shovel/wos"
 	"github.com/indexsupply/shovel/wpg"
 	"github.com/indexsupply/shovel/wslog"
+	"github.com/segmentio/kafka-go"
 )
 
 func check(err error) {
@@ -134,6 +137,9 @@ func main() {
 	pg, err := wpg.NewPool(ctx, pgurl)
 	check(err)
 
+	producer, err := initQProducer(conf)
+	check(err)
+
 	if !skipMigrate {
 		dbtx, err := pg.Begin(ctx)
 		check(err)
@@ -151,7 +157,7 @@ func main() {
 
 	var (
 		pbuf bytes.Buffer
-		mgr  = shovel.NewManager(ctx, pg, conf)
+		mgr  = shovel.NewManager(ctx, pg, producer, conf)
 		wh   = web.New(mgr, &conf, pg)
 	)
 	mux := http.NewServeMux()
@@ -213,6 +219,20 @@ func log(v bool, h http.Handler) http.Handler {
 			slog.Info("", "e", time.Since(t0), "u", r.URL.Path)
 		}
 	})
+}
+
+func initQProducer(config config.Root) (queue.Producer, error) {
+	conn, err := kafka.Dial("tcp", config.KafkaURL)
+	if err != nil {
+		slog.Error("unable to connect to kafka", "url", config.KafkaURL)
+		return nil, err
+	}
+
+	slog.Info("connected to kafka", "host", conn.Broker().Host)
+	w := kafka.NewWriter(kafka.WriterConfig{
+		Brokers: []string{config.KafkaURL},
+	})
+	return kafkaesqe.NewKafkaesqeService(w), nil
 }
 
 // Set using: go build -ldflags="-X main.Version=XXX"
